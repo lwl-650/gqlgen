@@ -14,7 +14,8 @@ import (
 type ckey string
 
 type resolver struct {
-	Rooms sync.Map
+	Rooms map[string]*Chatroom
+	mu    sync.Mutex // nolint: structcheck
 }
 
 func (r *resolver) Mutation() MutationResolver {
@@ -32,7 +33,7 @@ func (r *resolver) Subscription() SubscriptionResolver {
 func New() Config {
 	return Config{
 		Resolvers: &resolver{
-			Rooms: sync.Map{},
+			Rooms: map[string]*Chatroom{},
 		},
 		Directives: DirectiveRoot{
 			User: func(ctx context.Context, obj interface{}, next graphql.Resolver, username string) (res interface{}, err error) {
@@ -49,78 +50,103 @@ func getUsername(ctx context.Context) string {
 	return ""
 }
 
-type Observer struct {
-	Username string
-	Message  chan *Message
-}
-
 type Chatroom struct {
 	Name      string
 	Messages  []Message
-	Observers sync.Map
+	Observers map[string]struct {
+		Username string
+		Message  chan *Message
+	}
 }
 
 type mutationResolver struct{ *resolver }
 
 func (r *mutationResolver) Post(ctx context.Context, text string, username string, roomName string) (*Message, error) {
-	room := r.getRoom(roomName)
+	r.mu.Lock()
+	room := r.Rooms[roomName]
+	if room == nil {
+		room = &Chatroom{
+			Name: roomName,
+			Observers: map[string]struct {
+				Username string
+				Message  chan *Message
+			}{},
+		}
+		r.Rooms[roomName] = room
+	}
+	r.mu.Unlock()
 
-	message := &Message{
+	message := Message{
 		ID:        randString(8),
 		CreatedAt: time.Now(),
 		Text:      text,
 		CreatedBy: username,
 	}
 
-	room.Messages = append(room.Messages, *message)
-	room.Observers.Range(func(_, v interface{}) bool {
-		observer := v.(*Observer)
+	room.Messages = append(room.Messages, message)
+	r.mu.Lock()
+	for _, observer := range room.Observers {
 		if observer.Username == "" || observer.Username == message.CreatedBy {
-			observer.Message <- message
+			observer.Message <- &message
 		}
-		return true
-	})
-	return message, nil
+	}
+	r.mu.Unlock()
+	return &message, nil
 }
 
 type queryResolver struct{ *resolver }
 
-func (r *resolver) getRoom(name string) *Chatroom {
-	room, _ := r.Rooms.LoadOrStore(name, &Chatroom{
-		Name:      name,
-		Observers: sync.Map{},
-	})
-	return room.(*Chatroom)
-}
-
 func (r *queryResolver) Room(ctx context.Context, name string) (*Chatroom, error) {
-	return r.getRoom(name), nil
+	r.mu.Lock()
+	room := r.Rooms[name]
+	if room == nil {
+		room = &Chatroom{
+			Name: name,
+			Observers: map[string]struct {
+				Username string
+				Message  chan *Message
+			}{},
+		}
+		r.Rooms[name] = room
+	}
+	r.mu.Unlock()
+
+	return room, nil
 }
 
 type subscriptionResolver struct{ *resolver }
 
 func (r *subscriptionResolver) MessageAdded(ctx context.Context, roomName string) (<-chan *Message, error) {
-	room := r.getRoom(roomName)
+	r.mu.Lock()
+	room := r.Rooms[roomName]
+	if room == nil {
+		room = &Chatroom{
+			Name: roomName,
+			Observers: map[string]struct {
+				Username string
+				Message  chan *Message
+			}{},
+		}
+		r.Rooms[roomName] = room
+	}
+	r.mu.Unlock()
 
 	id := randString(8)
 	events := make(chan *Message, 1)
 
 	go func() {
 		<-ctx.Done()
-		room.Observers.Delete(id)
+		r.mu.Lock()
+		delete(room.Observers, id)
+		r.mu.Unlock()
 	}()
 
-	room.Observers.Store(id, &Observer{
-		Username: getUsername(ctx),
-		Message:  events,
-	})
-
-	events <- &Message{
-		ID:        randString(8),
-		CreatedAt: time.Now(),
-		Text:      "You've joined the room",
-		CreatedBy: "system",
-	}
+	r.mu.Lock()
+	room.Observers[id] = struct {
+		Username string
+		Message  chan *Message
+	}{Username: getUsername(ctx), Message: events}
+	r.mu.Unlock()
 
 	return events, nil
 }

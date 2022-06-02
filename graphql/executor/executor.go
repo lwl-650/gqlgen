@@ -67,9 +67,7 @@ func (e *Executor) CreateOperationContext(ctx context.Context, params *graphql.R
 
 	rc.Operation = rc.Doc.Operations.ForName(params.OperationName)
 	if rc.Operation == nil {
-		err := gqlerror.Errorf("operation %s not found", params.OperationName)
-		errcode.Set(err, errcode.ValidationFailed)
-		return rc, gqlerror.List{err}
+		return rc, gqlerror.List{gqlerror.Errorf("operation %s not found", params.OperationName)}
 	}
 
 	var err *gqlerror.Error
@@ -180,13 +178,6 @@ func (e *Executor) parseQuery(ctx context.Context, stats *graphql.Stats, query s
 	stats.Parsing.End = graphql.Now()
 
 	stats.Validation.Start = graphql.Now()
-
-	if len(doc.Operations) == 0 {
-		err = gqlerror.Errorf("no operation provided")
-		errcode.Set(err, errcode.ValidationFailed)
-		return nil, gqlerror.List{err}
-	}
-
 	listErr := validator.Validate(e.es.Schema(), doc)
 	if len(listErr) != 0 {
 		for _, e := range listErr {

@@ -7,10 +7,6 @@ exec:
   dir: .
   package: subdir
 
-federation:
-  filename: federation_gen.go
-  package: subdir
-
 model:
   filename: model.go
   package: subdir
